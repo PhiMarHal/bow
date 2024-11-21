@@ -1,12 +1,19 @@
-import { CoinbaseWalletSDK } from '@coinbase/wallet-sdk';
+// smartWallet.js
+import { createCoinbaseWalletSDK } from '@coinbase/wallet-sdk';
 import { ethers } from 'ethers';
 import { CONFIG } from './config';
 
 class SmartWalletManager {
     constructor() {
-        this.sdk = new CoinbaseWalletSDK({
+        this.sdk = createCoinbaseWalletSDK({
             appName: "Based On What?",
-            appChainIds: [8453],  // Base mainnet
+            appChainIds: [8453],
+            preference: {
+                options: "smartWalletOnly",
+                attribution: {
+                    auto: true
+                }
+            }
         });
 
         this.provider = null;
@@ -16,41 +23,27 @@ class SmartWalletManager {
         this.contract = null;
     }
 
-    async initialize() {
+    async connect() {
         try {
-            // Create Web3 provider forcing smart wallet usage
-            this.provider = this.sdk.makeWeb3Provider({
-                options: 'smartWalletOnly'
-            });
+            // Changed from makeWeb3Provider to getProvider
+            this.provider = this.sdk.getProvider();
 
-            // Create ethers provider wrapping the Web3 provider
+            // Rest stays the same
             this.ethersProvider = new ethers.providers.Web3Provider(this.provider);
-
-            // Get signer
             this.signer = this.ethersProvider.getSigner();
 
-            // Initialize contract
+            const accounts = await this.provider.request({
+                method: 'eth_requestAccounts'
+            });
+
+            this.userAddress = accounts[0];
+
             this.contract = new ethers.Contract(
                 CONFIG.CONTRACT_ADDRESS,
                 CONFIG.CONTRACT_ABI,
                 this.signer
             );
 
-            return true;
-        } catch (error) {
-            console.error('Error initializing smart wallet:', error);
-            throw error;
-        }
-    }
-
-    async connect() {
-        try {
-            // Request account access
-            const accounts = await this.provider.request({
-                method: 'eth_requestAccounts'
-            });
-
-            this.userAddress = accounts[0];
             return this.userAddress;
         } catch (error) {
             console.error('Error connecting smart wallet:', error);

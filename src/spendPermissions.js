@@ -8,15 +8,17 @@ export class SpendPermissionManager {
         this.contract = null;
         this.spenderAddress = null;
         this.spenderSigner = null;
+        this.spenderContract = null; // Add this
     }
 
     async initialize() {
         try {
-            // Get contract instance
+            // Start with read-only provider
+            const provider = new ethers.providers.JsonRpcProvider(this.config.RPC_URL);
             this.contract = new ethers.Contract(
                 this.config.SPEND_PERMISSION_MANAGER.address,
                 this.config.SPEND_PERMISSION_MANAGER.abi,
-                this.smartWalletManager.provider
+                provider
             );
 
             // Load spender configuration
@@ -26,13 +28,8 @@ export class SpendPermissionManager {
                 throw new Error('Spender configuration missing');
             }
 
-            // Create spender signer
-            this.spenderSigner = new ethers.Wallet(
-                spenderPrivateKey,
-                this.smartWalletManager.provider
-            );
-
-            // Get contract with spender signer
+            // Create spender signer and contract
+            this.spenderSigner = new ethers.Wallet(spenderPrivateKey, provider);
             this.spenderContract = this.contract.connect(this.spenderSigner);
 
         } catch (error) {
@@ -41,19 +38,35 @@ export class SpendPermissionManager {
         }
     }
 
+    // Update contract connection when wallet connects
+    async updateConnection() {
+        if (this.smartWalletManager.ethersProvider) {  // Changed from provider to ethersProvider
+            this.contract = new ethers.Contract(
+                this.config.SPEND_PERMISSION_MANAGER.address,
+                this.config.SPEND_PERMISSION_MANAGER.abi,
+                this.smartWalletManager.ethersProvider  // Use ethersProvider
+            );
+        }
+    }
+
+
     createPermission(userAddress) {
-        // Create a spend permission object for the user to sign
-        return {
+        console.log('Creating permission with user address:', userAddress);
+
+        const permission = {
             account: userAddress,
             spender: this.spenderAddress,
             token: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", // Native ETH
             allowance: ethers.utils.parseEther("0.01"), // Allow spending 0.01 ETH
-            period: 86400, // 1 day in seconds
-            start: 0, // Start immediately
-            end: 281474976710655, // Max uint48
-            salt: 0,
+            period: ethers.BigNumber.from(86400), // Convert to BigNumber
+            start: ethers.BigNumber.from(0),      // Convert to BigNumber
+            end: ethers.BigNumber.from(281474976710655), // Convert to BigNumber
+            salt: ethers.BigNumber.from(0),       // Convert to BigNumber
             extraData: "0x"
         };
+
+        console.log('Created permission object:', permission);
+        return permission;
     }
 
     async getPermissionSignature(spendPermission) {

@@ -1,7 +1,10 @@
 import { ethers } from 'ethers';
 import { CONFIG } from './config';
 import { smartWalletManager } from './smartWallet';
+import { SpendPermissionManager } from './spendPermissions';
+import { PaymasterService } from './paymasterService';
 import './styles.css';
+
 
 // Animation initialization
 const runes = ['ᛚ', 'ᚮ', 'ᛁ', 'ᚤ', 'ᛆ', 'ᛆ'];
@@ -71,6 +74,9 @@ createColumns();
 let contract;
 let userAddress;
 let loadingAnimationInterval;
+
+let spendPermissionManager;
+let paymasterService;
 
 // Cache structure initialization
 const wordCache = {
@@ -178,32 +184,29 @@ async function fetchAllCurrentWords() {
 
 async function initializeApp() {
     try {
-        // Set up read-only provider for initial load
+        console.log('Starting app initialization...');
         const provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URL);
         contract = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, CONFIG.CONTRACT_ABI, provider);
 
-        // Initialize background controls
-        initializeBackgroundControls();
+        // Initialize spend permission manager (but don't connect yet)
+        spendPermissionManager = new SpendPermissionManager(smartWalletManager, CONFIG);
+        await spendPermissionManager.initialize();
 
-        // Set up contract event listeners
-        setupEventListener();
+        paymasterService = new PaymasterService();
 
-        // Set up periodic cache maintenance
-        setupCacheMaintenance();
-
-        setupPendingTransactionCleanup();
-
-        // Initial load of all words
-        await loadAllWords();
-
-        // Set up wallet connection button
+        // Rest of initialization...
         document.getElementById('connect-wallet').addEventListener('click', connectWallet);
+        initializeBackgroundControls();
+        setupEventListener();
+        setupCacheMaintenance();
+        setupPendingTransactionCleanup();
+        await loadAllWords();
 
         if (window.ethereum) {
             window.ethereum.on('chainChanged', handleChainChange);
         }
     } catch (error) {
-        console.error('Initialization error:', error);
+        console.error('Full initialization error:', error);
         showStatus(`Initialization error: ${error.message}`, 'error');
     }
 }
@@ -443,16 +446,127 @@ async function updateWordsDisplay() {
     });
 }
 
-async function showWordPopup(wordIndex, wordInfo) {
+async function handleContribution(wordIndex, newWord, originalWordInfo, popup) {
+    try {
+        setLoading(true);
+
+        // Create user operation
+        const userOp = await createUserOperation(wordIndex, newWord);
+
+        // First get stub data
+        const stubData = await paymasterService.getPaymasterStubData(userOp);
+        console.log('Stub data received:', stubData);
+
+        // Update userOp with stub data for estimation
+        userOp.paymasterAndData = stubData.paymasterAndData;
+
+        // Then get actual paymaster data
+        const paymasterData = await paymasterService.getPaymasterData(userOp);
+        console.log('Final paymaster data:', paymasterData);
+
+        // Update userOp with final paymaster data
+        userOp.paymasterAndData = paymasterData.paymasterAndData;
+
+        // Add this line to actually send the operation!
+        const result = await sendUserOperation(userOp);
+        console.log('Operation result:', result);
+
+        // ... rest of the function
+    } catch (error) {
+        // Handle error and revert UI
+        handleContributionError(error, originalWordInfo, wordIndex);
+    } finally {
+        setLoading(false);
+    }
+}
+
+async function createUserOperation(wordIndex, newWord) {
+    const callData = contract.interface.encodeFunctionData('contribute', [
+        ethers.BigNumber.from(wordIndex),
+        newWord
+    ]);
+
+    // Create initial userOp
+    const userOp = {
+        sender: userAddress.toLowerCase(),
+        nonce: "0x0",
+        initCode: "0x",
+        callData,
+        callGasLimit: "0x3D090",
+        verificationGasLimit: "0x3D090",
+        preVerificationGas: "0x3D090",
+        maxFeePerGas: '0x' + (30000000).toString(16),
+        maxPriorityFeePerGas: '0x' + (100).toString(16),
+        paymasterAndData: "0x",
+        signature: "0x"
+    };
+
+    // Get paymaster data first
+    const stubData = await paymasterService.getPaymasterStubData(userOp);
+    userOp.paymasterAndData = stubData.paymasterAndData;
+
+    // Create the message to sign
+    const message = ethers.utils.solidityKeccak256(
+        ['address', 'uint256', 'bytes', 'bytes', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes'],
+        [
+            userOp.sender,
+            userOp.nonce,
+            userOp.initCode,
+            userOp.callData,
+            userOp.callGasLimit,
+            userOp.verificationGasLimit,
+            userOp.preVerificationGas,
+            userOp.maxFeePerGas,
+            userOp.maxPriorityFeePerGas,
+            userOp.paymasterAndData
+        ]
+    );
+
+    // Sign with our smart wallet
+    console.log('Signing message:', message);
+    const signature = await smartWalletManager.signer.signMessage(
+        ethers.utils.arrayify(message)
+    );
+    console.log('Got signature:', signature);
+    userOp.signature = signature;
+
+    // Get final paymaster data
+    const finalData = await paymasterService.getPaymasterData(userOp);
+    userOp.paymasterAndData = finalData.paymasterAndData;
+
+    return userOp;
+}
+
+async function updateOptimisticUI(wordIndex, newWord) {
+    wordCache.words[wordIndex] = {
+        word: newWord,
+        authorAddress: userAddress,
+        authorName: (await contract.users(userAddress)).name || userAddress,
+        tribe: 'pending',
+        isPending: true
+    };
+    await updateWordsDisplay();
+}
+
+function handleContributionError(error, originalWordInfo, wordIndex) {
+    let errorMsg = 'Error: ';
+    if (error.code === 'ACTION_REJECTED' || error.message.includes('rejected')) {
+        errorMsg += 'Transaction cancelled';
+    } else {
+        errorMsg += error.message;
+    }
+    showStatus(errorMsg, 'error');
+
+    // Revert optimistic update if needed
+    if (originalWordInfo) {
+        wordCache.words[wordIndex] = originalWordInfo;
+        updateWordsDisplay();
+    }
+}
+
+function showWordPopup(wordIndex, wordInfo) {
     if (!userAddress) {
         showStatus('Please connect your wallet first', 'error');
-        return;
-    }
-
-    // Check if user is registered
-    const user = await contract.users(userAddress);
-    if (!user.name) {
-        showRegistrationPopup();
         return;
     }
 
@@ -462,6 +576,36 @@ async function showWordPopup(wordIndex, wordInfo) {
         existingPopup.remove();
     }
 
+    // Create popup UI
+    const popup = createPopupUI(wordIndex, wordInfo);
+
+    // Add click handler
+    const button = popup.querySelector('.popup-button');
+    button.addEventListener('click', async () => {
+        const newWord = popup.querySelector('.popup-input').value.trim();
+        if (!newWord) {
+            showStatus('Please enter a word', 'error');
+            return;
+        }
+
+        if (!validateWord(newWord)) {
+            showStatus('Word must contain only letters, with optional punctuation at the end', 'error');
+            return;
+        }
+
+        const originalWordInfo = wordCache.words[wordIndex] ?
+            { ...wordCache.words[wordIndex] } : null;
+
+        await handleContribution(wordIndex, newWord, originalWordInfo, popup);
+    });
+
+    // Add popup to document
+    document.body.appendChild(popup);
+    popup.style.display = 'flex';
+    popup.querySelector('.popup-input').focus();
+}
+
+function createPopupUI(wordIndex, wordInfo) {
     const popup = document.createElement('div');
     popup.className = 'word-popup';
 
@@ -487,89 +631,151 @@ async function showWordPopup(wordIndex, wordInfo) {
     content.appendChild(info);
     popup.appendChild(content);
 
-    button.addEventListener('click', async () => {
-        const newWord = input.value.trim();
-        if (!newWord) {
-            showStatus('Please enter a word', 'error');
-            return;
-        }
-
-        try {
-            if (!validateWord(newWord)) {
-                throw new Error('Word must contain only letters, with optional punctuation at the end');
-            }
-
-            setLoading(true);
-
-            // Store the original word info
-            const originalWordInfo = { ...wordInfo };
-
-            // Optimistically update the display
-            wordCache.words[wordIndex] = {
-                word: newWord,
-                authorAddress: userAddress,
-                authorName: (await contract.users(userAddress)).name || userAddress,
-                tribe: 'pending',
-                isPending: true
-            };
-            await updateWordsDisplay();
-
-            // Close popup immediately
-            popup.remove();
-
-            try {
-                // Send transaction
-                const tx = await contract.contribute(wordIndex, newWord);
-                showStatus('Transaction sent! Waiting for confirmation...', 'success');
-
-                // Wait for transaction confirmation
-                await tx.wait();
-                showStatus('Word contributed successfully!', 'success');
-
-                // The event listener will handle updating the display
-                // No need to call updateSingleWord here
-
-            } catch (txError) {
-                // Transaction failed
-                showStatus('Transaction failed', 'error');
-                // Revert to original state
-                wordCache.words[wordIndex] = originalWordInfo;
-                await updateWordsDisplay();
-            }
-
-        } catch (error) {
-            let errorMsg = 'Error: ';
-            if (error.code === 'ACTION_REJECTED' || error.message.includes('rejected')) {
-                errorMsg += 'Transaction cancelled';
-            } else {
-                errorMsg += error.message.split('\n')[0].substring(0, 50);
-            }
-            showStatus(errorMsg, 'error');
-
-            // Revert to original state
-            wordCache.words[wordIndex] = originalWordInfo;
-            await updateWordsDisplay();
-        } finally {
-            setLoading(false);
-        }
-    });
-
-    input.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            button.click();
-        }
-    });
-
-    // Close popup when clicking outside
+    // Add click-outside-to-close handler
     popup.addEventListener('click', (e) => {
         if (e.target === popup) {
             popup.remove();
         }
     });
 
-    document.body.appendChild(popup);
-    popup.style.display = 'flex';
-    input.focus();
+    return popup;
+}
+
+async function getNonce(userAddress) {
+    try {
+        const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'eth_getUserOperationNonce',
+                params: [
+                    userAddress.toLowerCase(),
+                    paymasterService.entryPoint
+                ]
+            })
+        });
+
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.result;  // Returns hex string nonce
+    } catch (error) {
+        console.error('Error fetching nonce:', error);
+        throw error;
+    }
+}
+
+async function sendUserOperation(userOp) {
+    // First estimate gas
+    const gasEstimate = await estimateUserOperationGas(userOp);
+
+    // Update user operation with gas estimates
+    userOp.callGasLimit = gasEstimate.callGasLimit;
+    userOp.verificationGasLimit = gasEstimate.verificationGasLimit;
+    userOp.preVerificationGas = gasEstimate.preVerificationGas;
+
+    // Get current gas prices
+    const feeData = await smartWalletManager.provider.getFeeData();
+    userOp.maxFeePerGas = feeData.maxFeePerGas.toHexString();
+    userOp.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas.toHexString();
+
+    // Get user signature
+    const signature = await smartWalletManager.signer.signMessage(
+        ethers.utils.arrayify(hashUserOp(userOp))
+    );
+    userOp.signature = signature;
+
+    // Send the user operation
+    const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'eth_sendUserOperation',
+            params: [
+                userOp,
+                paymasterService.entryPoint
+            ]
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.error) {
+        throw new Error(data.error.message);
+    }
+
+    return data.result;
+}
+
+async function estimateUserOperationGas(userOp) {
+    const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'eth_estimateUserOperationGas',
+            params: [
+                userOp,
+                paymasterService.entryPoint
+            ]
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.error) {
+        throw new Error(data.error.message);
+    }
+
+    return data.result;
+}
+
+// Helper function to hash user operation
+function hashUserOp(userOp) {
+    // This is a simplified version - we might need to adjust the hashing algorithm
+    // based on Coinbase's requirements
+    return ethers.utils.keccak256(
+        ethers.utils.defaultAbiCoder.encode(
+            [
+                'address',   // sender
+                'uint256',   // nonce
+                'bytes',     // initCode
+                'bytes',     // callData
+                'uint256',   // callGasLimit
+                'uint256',   // verificationGasLimit
+                'uint256',   // preVerificationGas
+                'uint256',   // maxFeePerGas
+                'uint256',   // maxPriorityFeePerGas
+                'bytes',     // paymasterAndData
+            ],
+            [
+                userOp.sender,
+                userOp.nonce,
+                userOp.initCode,
+                userOp.callData,
+                userOp.callGasLimit,
+                userOp.verificationGasLimit,
+                userOp.preVerificationGas,
+                userOp.maxFeePerGas,
+                userOp.maxPriorityFeePerGas,
+                userOp.paymasterAndData,
+            ]
+        )
+    );
 }
 
 async function getWordWithAuthorInfo(index) {
@@ -653,14 +859,18 @@ function showStatus(message, type = 'info') {
 
     // Clean up the message
     let cleanMessage = message;
+    /*
     if (message.includes('0x')) {
         // Remove transaction hashes and long hex strings
         cleanMessage = message.replace(/0x[a-fA-F0-9]{10,}/g, '(tx)');
-    }
-    // Trim long messages
-    if (cleanMessage.length > 100) {
-        cleanMessage = cleanMessage.substring(0, 97) + '...';
-    }
+    }*/
+
+    // Remove or increase truncation
+    // if (cleanMessage.length > 100) {
+    //     cleanMessage = cleanMessage.substring(0, 97) + '...';
+    // }
+
+    console.log(message);  // Add this for debugging
 
     statusElement.textContent = cleanMessage;
     statusElement.className = type + ' visible';
@@ -703,30 +913,22 @@ async function switchNetwork() {
     }
 }
 
+
+
 async function connectWallet() {
     try {
         setLoading(true);
         showStatus('Initializing smart wallet...', 'info');
 
-        // Initialize the smart wallet
-        await smartWalletManager.initialize();
-
-        // Connect and get the address
         userAddress = await smartWalletManager.connect();
 
-        // Get new contract instance with signer
-        const connectedContract = await smartWalletManager.getContractFunction();
+        // Update spend permission manager connection
+        await spendPermissionManager.updateConnection();
 
-        // Important: properly transition from read-only to connected contract
-        if (contract) {
-            // Remove old listeners
-            contract.removeAllListeners();
-        }
+        // Get contract instance
+        contract = await smartWalletManager.getContractFunction();
 
-        // Update our contract reference
-        contract = connectedContract;
-
-        // Set up new event listeners with connected contract
+        // Set up event listeners
         setupEventListener();
 
         // Update UI
@@ -1065,3 +1267,36 @@ if (window.ethereum) {
     });
 }
 
+async function testPaymasterConnection() {
+    try {
+        const paymasterService = new PaymasterService();
+        const dummyOp = {
+            sender: "0x10004bc67CacA391f2298D0c5C42E40aC744703E",
+            nonce: "0x0",
+            initCode: "0x",
+            callData: "0x",
+            callGasLimit: "0x0",
+            verificationGasLimit: "0x0",
+            preVerificationGas: "0x0",
+            maxFeePerGas: "0x0",
+            maxPriorityFeePerGas: "0x0",
+            paymasterAndData: "0x",
+            signature: "0x"
+        };
+
+        console.log('Testing paymaster connection...');
+        // Change this line to use stub data
+        const result = await paymasterService.getPaymasterStubData(dummyOp);
+        console.log('Paymaster response:', result);
+        return result;
+    } catch (error) {
+        console.error('Paymaster test failed:', error);
+    }
+}
+
+// Add this temporarily to test
+window.addEventListener('load', () => {
+    testPaymasterConnection().then(result => {
+        console.log('Paymaster test complete:', result);
+    });
+});
