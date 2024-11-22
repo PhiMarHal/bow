@@ -450,33 +450,73 @@ async function handleContribution(wordIndex, newWord, originalWordInfo, popup) {
     try {
         setLoading(true);
 
-        // Create user operation
+        // Create initial user operation
         const userOp = await createUserOperation(wordIndex, newWord);
+        console.log('Created initial userOp:', userOp);
 
-        // First get stub data
-        const stubData = await paymasterService.getPaymasterStubData(userOp);
-        console.log('Stub data received:', stubData);
+        // Estimate gas using stub data
+        console.log('Estimating gas...');
+        const gasEstimate = await estimateUserOperationGas(userOp);
+        console.log('Gas estimate:', gasEstimate);
 
-        // Update userOp with stub data for estimation
-        userOp.paymasterAndData = stubData.paymasterAndData;
+        // Update userOp with gas estimates
+        userOp.callGasLimit = gasEstimate.callGasLimit;
+        userOp.verificationGasLimit = gasEstimate.verificationGasLimit;
+        userOp.preVerificationGas = gasEstimate.preVerificationGas;
 
-        // Then get actual paymaster data
+        // Get user signature
+        console.log('Getting signature...');
+        const message = ethers.utils.arrayify(hashUserOp(userOp));
+        const signature = await smartWalletManager.signer.signMessage(message);
+        userOp.signature = signature;
+
+        // Get final paymaster data
+        console.log('Getting final paymaster data...');
         const paymasterData = await paymasterService.getPaymasterData(userOp);
-        console.log('Final paymaster data:', paymasterData);
-
-        // Update userOp with final paymaster data
         userOp.paymasterAndData = paymasterData.paymasterAndData;
 
-        // Add this line to actually send the operation!
+        // Send the operation
+        console.log('Sending operation...');
         const result = await sendUserOperation(userOp);
         console.log('Operation result:', result);
 
-        // ... rest of the function
+        // Update UI optimistically
+        await updateOptimisticUI(wordIndex, newWord);
+        if (popup) popup.remove();
+        showStatus('Transaction submitted!', 'success');
+
     } catch (error) {
-        // Handle error and revert UI
+        console.error('Contribution error:', error);
         handleContributionError(error, originalWordInfo, wordIndex);
     } finally {
         setLoading(false);
+    }
+}
+
+async function getNonce() {
+    try {
+        const entryPointAbi = [
+            "function getNonce(address sender, uint192 key) view returns (uint256)"
+        ];
+
+        const entryPoint = new ethers.Contract(
+            paymasterService.entryPoint,
+            entryPointAbi,
+            smartWalletManager.ethersProvider
+        );
+
+        console.log('Querying nonce for address:', userAddress);
+
+        // Get nonce
+        const nonce = await entryPoint.getNonce(userAddress, 0);
+        // Convert BigNumber to number first, then to hex
+        const nonceHex = "0x" + nonce.toNumber().toString(16);
+
+        console.log('Got nonce from EntryPoint:', nonceHex);
+        return nonceHex;
+    } catch (error) {
+        console.error('Error getting nonce from EntryPoint:', error);
+        throw error;
     }
 }
 
@@ -486,55 +526,73 @@ async function createUserOperation(wordIndex, newWord) {
         newWord
     ]);
 
-    // Create initial userOp
+    // Get nonce directly from EntryPoint
+    const nonce = await getNonce();
+    console.log('Using nonce:', nonce);
+
     const userOp = {
         sender: userAddress.toLowerCase(),
-        nonce: "0x0",
+        nonce: nonce,
         initCode: "0x",
-        callData,
-        callGasLimit: "0x3D090",
-        verificationGasLimit: "0x3D090",
-        preVerificationGas: "0x3D090",
-        maxFeePerGas: '0x' + (30000000).toString(16),
-        maxPriorityFeePerGas: '0x' + (100).toString(16),
-        paymasterAndData: "0x",
-        signature: "0x"
+        callData: callData,
+        callGasLimit: "0x26000",
+        verificationGasLimit: "0x186A0",
+        preVerificationGas: "0x4e20",
+        maxFeePerGas: "0x" + Math.floor(0.031530401 * 1e9).toString(16),
+        maxPriorityFeePerGas: "0x" + Math.floor(0.000955499 * 1e9).toString(16),
+        paymasterAndData: "0x"
     };
 
-    // Get paymaster data first
+    // Rest of the function stays the same...
+    console.log('Getting paymaster stub data with userOp:', userOp);
     const stubData = await paymasterService.getPaymasterStubData(userOp);
     userOp.paymasterAndData = stubData.paymasterAndData;
 
     // Create the message to sign
-    const message = ethers.utils.solidityKeccak256(
-        ['address', 'uint256', 'bytes', 'bytes', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes'],
-        [
-            userOp.sender,
-            userOp.nonce,
-            userOp.initCode,
-            userOp.callData,
-            userOp.callGasLimit,
-            userOp.verificationGasLimit,
-            userOp.preVerificationGas,
-            userOp.maxFeePerGas,
-            userOp.maxPriorityFeePerGas,
-            userOp.paymasterAndData
-        ]
-    );
+    const userOpHash = getUserOpHash(userOp);
+    console.log('UserOp hash to sign:', userOpHash);
 
-    // Sign with our smart wallet
-    console.log('Signing message:', message);
+    // Get actual signature from the wallet
     const signature = await smartWalletManager.signer.signMessage(
-        ethers.utils.arrayify(message)
+        ethers.utils.arrayify(userOpHash)
     );
     console.log('Got signature:', signature);
+
+    // Add signature to userOp
     userOp.signature = signature;
 
-    // Get final paymaster data
-    const finalData = await paymasterService.getPaymasterData(userOp);
-    userOp.paymasterAndData = finalData.paymasterAndData;
-
     return userOp;
+}
+
+// Helper function to create the hash for signing
+function getUserOpHash(op) {
+    const encoded = ethers.utils.defaultAbiCoder.encode(
+        [
+            'address',   // sender
+            'uint256',   // nonce
+            'bytes32',   // initCodeHash
+            'bytes32',   // callDataHash
+            'uint256',   // callGasLimit
+            'uint256',   // verificationGasLimit
+            'uint256',   // preVerificationGas
+            'uint256',   // maxFeePerGas
+            'uint256',   // maxPriorityFeePerGas
+            'bytes32',   // paymasterAndDataHash
+        ],
+        [
+            op.sender,
+            op.nonce,
+            ethers.utils.keccak256(op.initCode || '0x'),
+            ethers.utils.keccak256(op.callData),
+            op.callGasLimit,
+            op.verificationGasLimit,
+            op.preVerificationGas,
+            op.maxFeePerGas,
+            op.maxPriorityFeePerGas,
+            ethers.utils.keccak256(op.paymasterAndData)
+        ]
+    );
+    return ethers.utils.keccak256(encoded);
 }
 
 async function updateOptimisticUI(wordIndex, newWord) {
@@ -641,52 +699,9 @@ function createPopupUI(wordIndex, wordInfo) {
     return popup;
 }
 
-async function getNonce(userAddress) {
-    try {
-        const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: 1,
-                method: 'eth_getUserOperationNonce',
-                params: [
-                    userAddress.toLowerCase(),
-                    paymasterService.entryPoint
-                ]
-            })
-        });
 
-        const data = await response.json();
-        if (data.error) throw new Error(data.error.message);
-        return data.result;  // Returns hex string nonce
-    } catch (error) {
-        console.error('Error fetching nonce:', error);
-        throw error;
-    }
-}
 
 async function sendUserOperation(userOp) {
-    // First estimate gas
-    const gasEstimate = await estimateUserOperationGas(userOp);
-
-    // Update user operation with gas estimates
-    userOp.callGasLimit = gasEstimate.callGasLimit;
-    userOp.verificationGasLimit = gasEstimate.verificationGasLimit;
-    userOp.preVerificationGas = gasEstimate.preVerificationGas;
-
-    // Get current gas prices
-    const feeData = await smartWalletManager.provider.getFeeData();
-    userOp.maxFeePerGas = feeData.maxFeePerGas.toHexString();
-    userOp.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas.toHexString();
-
-    // Get user signature
-    const signature = await smartWalletManager.signer.signMessage(
-        ethers.utils.arrayify(hashUserOp(userOp))
-    );
-    userOp.signature = signature;
-
-    // Send the user operation
     const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
         method: 'POST',
         headers: {
@@ -696,10 +711,7 @@ async function sendUserOperation(userOp) {
             jsonrpc: '2.0',
             id: 1,
             method: 'eth_sendUserOperation',
-            params: [
-                userOp,
-                paymasterService.entryPoint
-            ]
+            params: [userOp, paymasterService.entryPoint]
         })
     });
 
@@ -716,66 +728,73 @@ async function sendUserOperation(userOp) {
 }
 
 async function estimateUserOperationGas(userOp) {
-    const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'eth_estimateUserOperationGas',
-            params: [
-                userOp,
-                paymasterService.entryPoint
-            ]
-        })
-    });
+    try {
+        console.log('Starting gas estimation with full paymaster data');
 
-    if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const response = await fetch(`${paymasterService.baseUrl}${paymasterService.apiKey}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method: 'eth_estimateUserOperationGas',
+                params: [
+                    userOp,
+                    paymasterService.entryPoint
+                ]
+            })
+        });
+
+        const responseText = await response.text();
+        console.log('Raw estimation response:', responseText);
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}, response: ${responseText}`);
+        }
+
+        const data = JSON.parse(responseText);
+        if (data.error) {
+            throw new Error(`Estimation error: ${JSON.stringify(data.error)}`);
+        }
+
+        return data.result;
+    } catch (error) {
+        console.error('Detailed estimation error:', error);
+        throw error;
     }
-
-    const data = await response.json();
-    if (data.error) {
-        throw new Error(data.error.message);
-    }
-
-    return data.result;
 }
 
 // Helper function to hash user operation
 function hashUserOp(userOp) {
-    // This is a simplified version - we might need to adjust the hashing algorithm
-    // based on Coinbase's requirements
-    return ethers.utils.keccak256(
-        ethers.utils.defaultAbiCoder.encode(
-            [
-                'address',   // sender
-                'uint256',   // nonce
-                'bytes',     // initCode
-                'bytes',     // callData
-                'uint256',   // callGasLimit
-                'uint256',   // verificationGasLimit
-                'uint256',   // preVerificationGas
-                'uint256',   // maxFeePerGas
-                'uint256',   // maxPriorityFeePerGas
-                'bytes',     // paymasterAndData
-            ],
-            [
-                userOp.sender,
-                userOp.nonce,
-                userOp.initCode,
-                userOp.callData,
-                userOp.callGasLimit,
-                userOp.verificationGasLimit,
-                userOp.preVerificationGas,
-                userOp.maxFeePerGas,
-                userOp.maxPriorityFeePerGas,
-                userOp.paymasterAndData,
-            ]
-        )
+    const packed = ethers.utils.defaultAbiCoder.encode(
+        [
+            'address', // sender
+            'uint256', // nonce
+            'bytes32', // initCodeHash
+            'bytes32', // callDataHash
+            'uint256', // callGasLimit
+            'uint256', // verificationGasLimit
+            'uint256', // preVerificationGas
+            'uint256', // maxFeePerGas
+            'uint256', // maxPriorityFeePerGas
+            'bytes32'  // paymasterAndDataHash
+        ],
+        [
+            userOp.sender,
+            userOp.nonce,
+            ethers.utils.keccak256(userOp.initCode),
+            ethers.utils.keccak256(userOp.callData),
+            userOp.callGasLimit,
+            userOp.verificationGasLimit,
+            userOp.preVerificationGas,
+            userOp.maxFeePerGas,
+            userOp.maxPriorityFeePerGas,
+            ethers.utils.keccak256(userOp.paymasterAndData)
+        ]
     );
+    return ethers.utils.keccak256(packed);
 }
 
 async function getWordWithAuthorInfo(index) {

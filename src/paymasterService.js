@@ -80,12 +80,77 @@ export class PaymasterService {
     }
 
     // In PaymasterService class
+    // In paymasterService.js, modify getPaymasterStubData:
     async getPaymasterStubData(userOp) {
-        return this.makeRequest('pm_getPaymasterStubData', userOp);
+        try {
+            const response = await fetch(`${this.baseUrl}${this.apiKey}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'pm_getPaymasterStubData',
+                    params: [
+                        userOp,
+                        this.entryPoint,
+                        "0x2105",  // Base mainnet chainId
+                        {}  // Empty policy object
+                    ]
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data.error) {
+                throw new Error(data.error.message);
+            }
+
+            return data.result;
+        } catch (error) {
+            console.error('Error getting paymaster stub data:', error);
+            throw error;
+        }
     }
 
     async getPaymasterData(userOp) {
-        return this.makeRequest('pm_getPaymasterData', userOp);
+        try {
+            const response = await fetch(`${this.baseUrl}${this.apiKey}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'pm_getPaymasterData',
+                    params: [
+                        userOp,
+                        this.entryPoint,
+                        "0x2105",  // Base mainnet chainId
+                        {}  // Empty policy object
+                    ]
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data.error) {
+                throw new Error(data.error.message);
+            }
+
+            return data.result;
+        } catch (error) {
+            console.error('Error getting paymaster data:', error);
+            throw error;
+        }
     }
 
     async makeRequest(method, userOp) {
