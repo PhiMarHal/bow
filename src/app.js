@@ -450,32 +450,20 @@ async function handleContribution(wordIndex, newWord, originalWordInfo, popup) {
     try {
         setLoading(true);
 
-        // Create initial user operation
+        // Create the userOp with all necessary data
         const userOp = await createUserOperation(wordIndex, newWord);
-        console.log('Created initial userOp:', userOp);
-
-        // Estimate gas using stub data
-        console.log('Estimating gas...');
-        const gasEstimate = await estimateUserOperationGas(userOp);
-        console.log('Gas estimate:', gasEstimate);
-
-        // Update userOp with gas estimates
-        userOp.callGasLimit = gasEstimate.callGasLimit;
-        userOp.verificationGasLimit = gasEstimate.verificationGasLimit;
-        userOp.preVerificationGas = gasEstimate.preVerificationGas;
-
-        // Get user signature
-        console.log('Getting signature...');
-        const message = ethers.utils.arrayify(hashUserOp(userOp));
-        const signature = await smartWalletManager.signer.signMessage(message);
-        userOp.signature = signature;
+        console.log('Final userOp ready to send:', {
+            ...userOp,
+            callData: userOp.callData.slice(0, 66) + '...',
+            signature: userOp.signature.slice(0, 66) + '...'
+        });
 
         // Get final paymaster data
         console.log('Getting final paymaster data...');
         const paymasterData = await paymasterService.getPaymasterData(userOp);
         userOp.paymasterAndData = paymasterData.paymasterAndData;
 
-        // Send the operation
+        // Send operation
         console.log('Sending operation...');
         const result = await sendUserOperation(userOp);
         console.log('Operation result:', result);
@@ -536,8 +524,8 @@ async function createUserOperation(wordIndex, newWord) {
         initCode: "0x",
         callData: callData,
         callGasLimit: "0x26000",
-        verificationGasLimit: "0x186A0",
-        preVerificationGas: "0x4e20",
+        verificationGasLimit: "0x26000",
+        preVerificationGas: "0x26000",
         maxFeePerGas: "0x" + Math.floor(0.031530401 * 1e9).toString(16),
         maxPriorityFeePerGas: "0x" + Math.floor(0.000955499 * 1e9).toString(16),
         paymasterAndData: "0x"
